@@ -1,0 +1,64 @@
+{{- /* Target version: set it here (once); referenced below as {{$target}}. */ -}}
+{{- $target := "hashicorp/consul:1.22.7" -}}
+{{- /* The commands below are the hashicorp-consul-sandbox implementation. In your own
+       environment, replace the docker compose block with your provisioning (stop the
+       old server, set up and start the new version at the same IP). */ -}}
+{{- $project := "hashicorp-consul-sandbox" -}}
+{{- $ctl := "consul-client-0" -}}
+# Consul server rolling upgrade (fixed IP, fresh provision) (generated)
+
+{{len .Steps}} servers to {{$target}}. Detected leader: **{{.Leader}}**.
+Replacement order (followers first, leader last): {{range .Steps}}`{{.Node}}`{{if .IsLeader}} (LEADER){{end}} {{end}}
+
+> Per-step `consul-state-diff` verdict: **PASS** continue / **INVESTIGATE** read the loss and record it / **FAIL** stop.
+
+## 0. Before you start (once)
+
+Bring up two monitors, seed a stable canary key for client-tail, and take the baseline:
+
+```
+export PATH="$HOME/bin:$PATH"
+export CONSUL_SERVER_IMAGE={{$target}}
+mkdir -p {{.RunsDir}}
+
+# a stable canary key for client-tail (a fixed key no churn touches)
+docker compose exec -T {{$ctl}} consul kv put canary/keepalive ok
+
+# in two other terminals, keep both visible for the whole window:
+#   server-side quorum (leader present, voters, index convergence)
+{{.ServerTail}}
+#   the old clients' local access path (the residual the servers cannot see)
+consul-client-tail --inventory clients.json
+
+{{.BaselineDump}}
+```
+{{range .Steps}}
+## Step {{.I}} / {{.N}}: {{.Role}} `{{.Node}}` ({{.Host}})
+{{if .IsLeader}}
+> This node is the leader; stopping it triggers an election. Confirm a new leader is in
+> place before pruning.
+{{end}}
+Shut the old server down and bring up a fresh {{$target}} server at the same IP (new
+disk, so a new node-id):
+
+```
+docker compose rm -sf {{.Node}}
+docker compose exec -T {{$ctl}} {{.Prune}}
+docker volume rm {{$project}}_{{.Node}}-data
+docker compose up -d {{.Node}}
+```
+
+Wait on `consul-server-tail` for the cluster to re-stabilise (leader present,
+voters={{.N}}, indexes converged) and check `consul-client-tail` is still green, then
+verify the state:
+
+```
+{{.Dump}}
+{{.Diff}}
+```
+{{end}}
+## Done
+
+All steps PASS, every server on {{$target}} with a new node-id at the same IP, the
+leader present, voters={{len .Steps}}. Then upgrade the clients (servers first, clients
+last).
